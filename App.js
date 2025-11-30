@@ -1,282 +1,551 @@
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Alert, ImageBackground, SafeAreaView, ActivityIndicator, FlatList, Modal, Image } from 'react-native';
+import { 
+  StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Alert, 
+  ImageBackground, SafeAreaView, ActivityIndicator, LayoutAnimation, Platform, UIManager, Modal, KeyboardAvoidingView, FlatList 
+} from 'react-native';
 import { useEffect, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker'; 
 import { supabase } from './supabase'; 
 
+// --- ENABLE SMOOTH ANIMATIONS ---
+if (Platform.OS === 'android') {
+  if (UIManager.setLayoutAnimationEnabledExperimental) {
+    UIManager.setLayoutAnimationEnabledExperimental(true);
+  }
+}
+
 export default function App() {
+  // STATE
   const [session, setSession] = useState(null);
   const [userRole, setUserRole] = useState(null);
-  const [view, setView] = useState('welcome'); // Views: welcome, auth, main
-  const [activeTab, setActiveTab] = useState('home'); // Tabs: home, myapps, profile
+  const [view, setView] = useState('welcome'); 
+  const [activeTab, setActiveTab] = useState('home'); 
   const [loading, setLoading] = useState(true);
   
-  // Profile Data
-  const [profile, setProfile] = useState({ full_name: '', phone: '', bio: '', experience_years: '' });
-  
-  // Auth Forms
+  // Profile
+  const [profile, setProfile] = useState({ full_name: '', phone: '', bio: '', experience_years: '', experience_details: '', resume_url: '' });
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+
+  // Auth
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoginMode, setIsLoginMode] = useState(true);
 
-  // App Data
-  const [jobs, setJobs] = useState([]);
-  const [myApplications, setMyApplications] = useState([]); // List of job IDs I applied to
-  const [applicants, setApplicants] = useState([]);
-  
-  // Farmer Post Job Inputs
+  // Data
+  const [jobs, setJobs] = useState([]); 
+  const [myApplications, setMyApplications] = useState([]); 
   const [newJob, setNewJob] = useState({ title: '', location: '', pay: '', desc: '' });
+  
+  // Community
+  const [posts, setPosts] = useState([]);
+  const [newPostContent, setNewPostContent] = useState('');
+  
+  // Modals
+  const [selectedJob, setSelectedJob] = useState(null);
+  const [jobModalVisible, setJobModalVisible] = useState(false);
+  const [commentModalVisible, setCommentModalVisible] = useState(false);
+  const [selectedPost, setSelectedPost] = useState(null);
+  const [comments, setComments] = useState([]);
+  const [newComment, setNewComment] = useState('');
 
-  // Chat
-  const [chatVisible, setChatVisible] = useState(false);
-  const [activeAppId, setActiveAppId] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
+  // Resume
+  const [uploadingResume, setUploadingResume] = useState(false);
 
   useEffect(() => { checkUser(); }, []);
 
-  // --- AUTH & SETUP ---
-  const checkUser = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session) {
-      setSession(session);
-      fetchProfile(session.user.id);
-    } else {
-      setLoading(false); setView('welcome');
-    }
+  // --- ANIMATED TRANSITIONS ---
+  const changeView = (newView) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setView(newView);
+  };
+  const changeTab = (newTab) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setActiveTab(newTab);
+    if (newTab === 'community') fetchPosts();
+    if (newTab === 'home' && session) fetchData(userRole, session.user.id);
   };
 
-  const fetchProfile = async (userId) => {
-    const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
-    if (data) {
-      setUserRole(data.role);
-      setProfile(data);
-      if (data.role === 'worker' && !data.experience_years) {
-        // First time setup? Let's just go to profile tab later.
+  // --- AUTH ---
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setSession(null); setUserRole(null); setJobs([]); setMyApplications([]);
+    setProfile({ full_name: '', phone: '', bio: '', experience_years: '' });
+    changeView('welcome');
+  };
+
+  const checkUser = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        setSession(session);
+        const { data } = await supabase.from('profiles').select('*').eq('id', session.user.id).single();
+        if (data) {
+          setUserRole(data.role);
+          setProfile(data);
+          changeView('main');
+          fetchData(data.role, session.user.id);
+        } else {
+           setLoading(false); changeView('welcome');
+        }
+      } else {
+        setLoading(false); changeView('welcome');
       }
-      setView('main');
-      fetchData(data.role, userId);
-    }
-    setLoading(false);
+    } catch (e) { setLoading(false); }
   };
 
   const fetchData = async (role, userId) => {
-    // 1. Fetch Jobs
-    if (role === 'farmer') {
-      const { data } = await supabase.from('jobs').select('*').eq('farmer_id', userId);
-      setJobs(data || []);
-    } else {
-      const { data } = await supabase.from('jobs').select('*');
-      setJobs(data || []);
-      
-      // 2. Fetch My Applications (To check what I already applied to)
-      const { data: apps } = await supabase.from('applications').select('job_id, status').eq('worker_id', userId);
-      if (apps) setMyApplications(apps);
-    }
+    try {
+      let jobQuery = supabase.from('jobs').select('*');
+      if (role === 'farmer') {
+        jobQuery = jobQuery.eq('farmer_id', userId); 
+      }
+      const { data: jobData } = await jobQuery;
+      setJobs(jobData || []);
+
+      if (role === 'worker') {
+        const { data: appData } = await supabase.from('applications').select('*, jobs(*)').eq('worker_id', userId);
+        setMyApplications(appData || []);
+      }
+    } catch (e) { console.log(e); } 
+    finally { setLoading(false); }
   };
 
   const handleAuth = async () => {
+    if(!email || !password) return Alert.alert("Error", "Please fill in all fields");
     setLoading(true);
+    
     if (isLoginMode) {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) { Alert.alert("Error", error.message); setLoading(false); }
-      else { setSession(data.session); fetchProfile(data.session.user.id); }
+      if (error) { Alert.alert("Login Failed", error.message); setLoading(false); } 
+      else { 
+        setSession(data.session); 
+        const { data: profileData } = await supabase.from('profiles').select('*').eq('id', data.session.user.id).single();
+        if(profileData) {
+          setUserRole(profileData.role); setProfile(profileData); changeView('main'); fetchData(profileData.role, data.session.user.id);
+        } else {
+            await supabase.from('profiles').insert({ id: data.session.user.id, role: userRole || 'worker', full_name: 'New User' });
+            setLoading(false); changeView('welcome');
+        }
+      }
     } else {
       const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) { Alert.alert("Error", error.message); setLoading(false); }
       else {
         await supabase.from('profiles').insert({ id: data.user.id, role: userRole, full_name: 'New User' });
-        Alert.alert("Success", "Account created! Please Log in.");
-        setIsLoginMode(true); setLoading(false);
+        Alert.alert("Success", "Account created! Please Log in."); setIsLoginMode(true); setLoading(false);
       }
     }
   };
 
-  // --- ACTIONS ---
-  const applyForJob = async (jobId) => {
-    const { error } = await supabase.from('applications').insert({ job_id: jobId, worker_id: session.user.id });
-    if (error) {
-      if(error.code === '23505') Alert.alert("Notice", "You have already applied.");
-      else Alert.alert("Error", error.message);
-    } else {
-      Alert.alert("Success", "Application Sent!");
-      fetchData('worker', session.user.id); // Refresh to update buttons
+  const handleForgotPassword = async () => {
+    if (!email) return Alert.alert("Wait!", "Please type your email in the box first.");
+    const { error } = await supabase.auth.resetPasswordForEmail(email);
+    if (error) Alert.alert("Error", error.message);
+    else Alert.alert("Check Email", "Password reset link sent to " + email);
+  };
+
+  // --- ACTIONS: JOB POSTING (FIXED) ---
+  const postJob = async () => {
+    if (!newJob.title || !newJob.pay) return Alert.alert("Missing Info");
+    
+    // FIX: We explicitly map 'desc' to 'description' so DB understands
+    const { error } = await supabase.from('jobs').insert({ 
+        title: newJob.title,
+        location: newJob.location,
+        pay_rate: newJob.pay,
+        description: newJob.desc, // <--- THIS WAS THE FIX
+        farmer_id: session.user.id 
+    });
+
+    if (error) Alert.alert("Error", error.message);
+    else {
+        setNewJob({ title: '', location: '', pay: '', desc: '' });
+        Alert.alert("Success", "Job Posted!");
+        fetchData('farmer', session.user.id);
     }
   };
 
-  const postJob = async () => {
-    if (!newJob.title || !newJob.pay) return Alert.alert("Missing Info");
-    await supabase.from('jobs').insert({ 
-      title: newJob.title, location: newJob.location, pay_rate: newJob.pay, description: newJob.desc, farmer_id: session.user.id 
-    });
-    setNewJob({ title: '', location: '', pay: '', desc: '' });
-    Alert.alert("Success", "Job Posted!");
-    fetchData('farmer', session.user.id);
+  const applyForJob = async (jobId) => {
+    if (myApplications.find(a => a.job_id === jobId)) return Alert.alert("Notice", "Already Applied");
+    const { error } = await supabase.from('applications').insert({ job_id: jobId, worker_id: session.user.id });
+    if (!error) {
+      Alert.alert("🎉 Success", "Application Sent!"); setJobModalVisible(false); fetchData('worker', session.user.id);
+    }
   };
 
-  const updateProfile = async () => {
+  // --- COMMUNITY (FIXED LIKES) ---
+  const fetchPosts = async () => {
+    // Get posts AND the likes specifically for THIS user
+    const { data } = await supabase
+        .from('posts')
+        .select('*, post_likes(user_id)')
+        .order('created_at', { ascending: false });
+        
+    if (data) {
+        // Process data to see if *I* liked it
+        const processed = data.map(post => ({
+            ...post,
+            isLikedByMe: post.post_likes.some(like => like.user_id === session.user.id)
+        }));
+        setPosts(processed);
+    }
+  };
+
+  const createPost = async () => {
+    if (!newPostContent) return;
+    const { error } = await supabase.from('posts').insert({
+      content: newPostContent, author_id: session.user.id, author_name: profile.full_name, author_role: userRole
+    });
+    if (!error) { setNewPostContent(''); fetchPosts(); }
+  };
+
+  const toggleLike = async (post) => {
+    // Optimistic UI Update
+    const isCurrentlyLiked = post.isLikedByMe;
+    const newLikeCount = isCurrentlyLiked ? (post.likes - 1) : (post.likes + 1);
+    
+    const updatedPosts = posts.map(p => p.id === post.id ? { ...p, likes: newLikeCount, isLikedByMe: !isCurrentlyLiked } : p);
+    setPosts(updatedPosts);
+
+    if (isCurrentlyLiked) {
+        // Unlike: Remove from DB
+        await supabase.from('post_likes').delete().match({ user_id: session.user.id, post_id: post.id });
+        await supabase.from('posts').update({ likes: newLikeCount }).eq('id', post.id);
+    } else {
+        // Like: Add to DB
+        await supabase.from('post_likes').insert({ user_id: session.user.id, post_id: post.id });
+        await supabase.from('posts').update({ likes: newLikeCount }).eq('id', post.id);
+    }
+  };
+
+  const openComments = async (post) => {
+    setSelectedPost(post);
+    setCommentModalVisible(true);
+    const { data } = await supabase.from('comments').select('*').eq('post_id', post.id).order('created_at');
+    setComments(data || []);
+  };
+
+  const postComment = async () => {
+    if (!newComment) return;
+    const { error } = await supabase.from('comments').insert({
+      post_id: selectedPost.id, user_id: session.user.id, user_name: profile.full_name, content: newComment
+    });
+    if (!error) {
+      setNewComment('');
+      const { data } = await supabase.from('comments').select('*').eq('post_id', selectedPost.id).order('created_at');
+      setComments(data || []);
+    }
+  };
+
+  // --- RESUME & HELPERS ---
+  const pickResume = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true });
+      if (!result.canceled) { uploadResumeToSupabase(result.assets[0]); }
+    } catch (err) { console.log(err); }
+  };
+
+  const uploadResumeToSupabase = async (file) => {
+    setUploadingResume(true);
+    const fileName = `${session.user.id}_${Date.now()}.pdf`;
+    const formData = new FormData();
+    formData.append('file', { uri: file.uri, name: file.name, type: 'application/pdf' });
+    const { error } = await supabase.storage.from('resumes').upload(fileName, formData, { contentType: 'application/pdf' });
+    if (error) Alert.alert("Upload Failed", error.message);
+    else {
+      const { data } = supabase.storage.from('resumes').getPublicUrl(fileName);
+      const newUrl = data.publicUrl;
+      await supabase.from('profiles').update({ resume_url: newUrl }).eq('id', session.user.id);
+      setProfile({ ...profile, resume_url: newUrl });
+      Alert.alert("Success", "Resume Uploaded!");
+    }
+    setUploadingResume(false);
+  };
+
+  const saveProfile = async () => {
     setLoading(true);
     const { error } = await supabase.from('profiles').update({
-      full_name: profile.full_name,
-      phone: profile.phone,
-      bio: profile.bio,
-      experience_years: profile.experience_years
+      full_name: profile.full_name, phone: profile.phone, bio: profile.bio,
+      experience_years: profile.experience_years, experience_details: profile.experience_details
     }).eq('id', session.user.id);
     setLoading(false);
     if (error) Alert.alert("Error", error.message);
-    else Alert.alert("Success", "Profile Updated!");
+    else { Alert.alert("Success", "Profile Updated!"); setIsEditingProfile(false); }
   };
 
-  // --- HELPER TO CHECK IF APPLIED ---
-  const getApplicationStatus = (jobId) => {
+  const getAppStatus = (jobId) => {
     const app = myApplications.find(a => a.job_id === jobId);
-    return app ? app.status : null; // returns 'pending', 'accepted', or null
+    return app ? app.status : null; 
   };
 
   // --- RENDERERS ---
 
   if (loading) return <View style={styles.center}><ActivityIndicator size="large" color="#2E5834" /></View>;
 
-  // 1. WELCOME SCREEN
+  // 1. WELCOME
   if (view === 'welcome') return (
     <ImageBackground source={{uri: 'https://images.unsplash.com/photo-1625246333195-98d804e9b371?q=80'}} style={styles.bgImage}>
       <View style={styles.overlay}>
-        <Text style={styles.titleBig}>AgriLink</Text>
+        <Text style={styles.titleBig}>AgriLink 🌾</Text>
         <Text style={{color:'#eee', marginBottom:30}}>Connect. Grow. Harvest.</Text>
         <View style={styles.glassCard}>
-          <Text style={styles.labelWhite}>I am a...</Text>
-          <TouchableOpacity style={styles.roleBtn} onPress={() => { setUserRole('farmer'); setView('auth'); }}>
-            <Ionicons name="leaf" size={24} color="#2E5834" /><Text style={styles.roleText}>Farmer</Text>
+          <Text style={styles.labelWhite}>Choose your role:</Text>
+          <TouchableOpacity style={styles.roleBtn} onPress={() => { setUserRole('farmer'); changeView('auth'); }}>
+            <Text style={{fontSize:24}}>👨‍🌾</Text><Text style={styles.roleText}>Farmer</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.roleBtn} onPress={() => { setUserRole('worker'); setView('auth'); }}>
-            <Ionicons name="hammer" size={24} color="#2E5834" /><Text style={styles.roleText}>Worker</Text>
+          <TouchableOpacity style={styles.roleBtn} onPress={() => { setUserRole('worker'); changeView('auth'); }}>
+            <Text style={{fontSize:24}}>👷</Text><Text style={styles.roleText}>Worker</Text>
           </TouchableOpacity>
         </View>
       </View>
     </ImageBackground>
   );
 
-  // 2. AUTH SCREEN
+  // 2. AUTH
   if (view === 'auth') return (
     <SafeAreaView style={styles.container}>
       <View style={styles.padding}>
-        <TouchableOpacity onPress={() => setView('welcome')}><Ionicons name="arrow-back" size={24} color="#333" /></TouchableOpacity>
-        <Text style={styles.header}>{isLoginMode ? 'Welcome Back' : 'Create Account'}</Text>
+        <TouchableOpacity onPress={() => changeView('welcome')}><Ionicons name="arrow-back" size={24} color="#333" /></TouchableOpacity>
+        <Text style={styles.header}>{isLoginMode ? 'Welcome Back 👋' : 'Join Us 🚀'}</Text>
         <Text style={styles.subHeader}>{userRole === 'farmer' ? 'Farmer Portal' : 'Worker Portal'}</Text>
-        
-        <TextInput placeholder="Email" value={email} onChangeText={setEmail} autoCapitalize="none" style={styles.input} />
-        <TextInput placeholder="Password" value={password} onChangeText={setPassword} secureTextEntry style={styles.input} />
-        
-        <TouchableOpacity style={styles.btnMain} onPress={handleAuth}>
-          <Text style={styles.btnText}>{isLoginMode ? 'Log In' : 'Sign Up'}</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity onPress={() => setIsLoginMode(!isLoginMode)} style={{marginTop:20, alignSelf:'center'}}>
-          <Text style={{color:'#2E5834'}}>{isLoginMode ? 'New here? Sign Up' : 'Have an account? Log In'}</Text>
+        <TextInput placeholder="📧 Email" value={email} onChangeText={setEmail} autoCapitalize="none" style={styles.input} />
+        <TextInput placeholder="🔒 Password" value={password} onChangeText={setPassword} secureTextEntry style={styles.input} />
+        <TouchableOpacity style={styles.btnMain} onPress={handleAuth}><Text style={styles.btnText}>{isLoginMode ? 'Log In' : 'Sign Up'}</Text></TouchableOpacity>
+        {isLoginMode && <TouchableOpacity onPress={handleForgotPassword} style={{alignSelf:'flex-end', marginTop:10}}><Text style={{color:'#666'}}>Forgot Password?</Text></TouchableOpacity>}
+        <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.spring); setIsLoginMode(!isLoginMode); }} style={{marginTop:30, alignSelf:'center'}}>
+            <Text style={{color:'#2E5834', fontWeight:'bold'}}>{isLoginMode ? 'New here? Create Account' : 'Back to Login'}</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
 
-  // 3. MAIN APP (TABS)
+  // 3. MAIN APP
   return (
     <SafeAreaView style={styles.container}>
-      {/* HEADER */}
       <View style={styles.topBar}>
-        <Text style={styles.appLogo}>AgriLink</Text>
-        <TouchableOpacity onPress={async () => { await supabase.auth.signOut(); setView('welcome'); }}>
-          <Ionicons name="log-out-outline" size={24} color="white" />
-        </TouchableOpacity>
+        <Text style={styles.appLogo}>AgriLink 🚜</Text>
+        <TouchableOpacity onPress={handleLogout}><Ionicons name="log-out-outline" size={24} color="white" /></TouchableOpacity>
       </View>
 
       <View style={{flex:1}}>
-        
-        {/* TAB: HOME (Jobs) */}
+        {/* TAB: JOBS */}
         {activeTab === 'home' && (
           <ScrollView contentContainerStyle={styles.padding}>
+            <TouchableOpacity style={styles.communityBanner} onPress={() => { changeTab('community'); }}>
+               <View><Text style={{fontWeight:'bold', color:'#fff'}}>📢 Community Hub</Text><Text style={{color:'#E8F5E9', fontSize:12}}>See what's happening</Text></View>
+               <Ionicons name="arrow-forward-circle" size={30} color="white" />
+            </TouchableOpacity>
+
             {userRole === 'farmer' && (
-              <View style={styles.card}>
-                <Text style={styles.cardHeader}>Post a Job</Text>
-                <TextInput placeholder="Job Title" value={newJob.title} onChangeText={t=>setNewJob({...newJob, title:t})} style={styles.inputSmall} />
-                <View style={{flexDirection:'row', gap:10}}>
-                   <TextInput placeholder="Location" value={newJob.location} onChangeText={t=>setNewJob({...newJob, location:t})} style={[styles.inputSmall, {flex:1}]} />
-                   <TextInput placeholder="Pay (RM)" value={newJob.pay} onChangeText={t=>setNewJob({...newJob, pay:t})} style={[styles.inputSmall, {flex:1}]} />
+              <>
+                <View style={styles.card}>
+                  <Text style={styles.cardHeader}>✍️ Post a Job</Text>
+                  <TextInput placeholder="Job Title" value={newJob.title} onChangeText={t=>setNewJob({...newJob, title:t})} style={styles.inputSmall} />
+                  <View style={{flexDirection:'row', gap:10}}>
+                     <TextInput placeholder="📍 Location" value={newJob.location} onChangeText={t=>setNewJob({...newJob, location:t})} style={[styles.inputSmall, {flex:1}]} />
+                     <TextInput placeholder="💰 Pay (RM)" value={newJob.pay} onChangeText={t=>setNewJob({...newJob, pay:t})} style={[styles.inputSmall, {flex:1}]} />
+                  </View>
+                  <TextInput placeholder="📝 Description" value={newJob.desc} onChangeText={t=>setNewJob({...newJob, desc:t})} style={styles.inputSmall} />
+                  <TouchableOpacity style={styles.btnMain} onPress={postJob}><Text style={styles.btnText}>Post</Text></TouchableOpacity>
                 </View>
-                <TouchableOpacity style={styles.btnMain} onPress={postJob}><Text style={styles.btnText}>Post</Text></TouchableOpacity>
-              </View>
+
+                <Text style={styles.sectionTitle}>My Listings 📋</Text>
+                {jobs.map(job => (
+                  <View key={job.id} style={styles.jobCard}>
+                    <View style={{flex:1}}>
+                      <Text style={styles.jobTitle}>{job.title}</Text>
+                      <Text style={styles.jobSub}>📍 {job.location}  •  💰 {job.pay_rate}</Text>
+                    </View>
+                    <View style={[styles.statusBadge, {backgroundColor:'#E8F5E9'}]}>
+                        <Text style={{fontSize:10, fontWeight:'bold', color:'green'}}>ACTIVE</Text>
+                    </View>
+                  </View>
+                ))}
+              </>
             )}
 
-            <Text style={styles.sectionTitle}>{userRole === 'farmer' ? 'My Listings' : 'Available Jobs'}</Text>
-            {jobs.map(job => {
-              const status = getApplicationStatus(job.id);
-              return (
-                <View key={job.id} style={styles.jobCard}>
-                  <View>
-                    <Text style={styles.jobTitle}>{job.title}</Text>
-                    <Text style={styles.jobSub}>📍 {job.location}  •  💰 {job.pay_rate}</Text>
-                  </View>
-                  {userRole === 'worker' && (
-                    <TouchableOpacity 
-                      style={[styles.applyBtn, status && styles.disabledBtn]} 
-                      disabled={!!status}
-                      onPress={() => applyForJob(job.id)}>
-                      <Text style={styles.applyBtnText}>{status ? status.toUpperCase() : 'Apply'}</Text>
+            {userRole === 'worker' && (
+              <>
+                <Text style={styles.sectionTitle}>My Applications 📂</Text>
+                {myApplications.length === 0 ? (
+                  <Text style={{color:'#999', fontStyle:'italic', marginBottom:20}}>No applications yet.</Text>
+                ) : (
+                  myApplications.map(app => (
+                    <View key={app.id} style={[styles.jobCard, {borderLeftColor: app.status==='accepted'?'green':'orange'}]}>
+                      <View>
+                        <Text style={styles.jobTitle}>{app.jobs ? app.jobs.title : 'Job Removed'}</Text>
+                        <Text style={{color:'#666', fontSize:12}}>Status: <Text style={{fontWeight:'bold', color: app.status==='accepted'?'green':'orange'}}>{app.status.toUpperCase()}</Text></Text>
+                      </View>
+                    </View>
+                  ))
+                )}
+
+                <Text style={[styles.sectionTitle, {marginTop:10}]}>Available Jobs 💼</Text>
+                {jobs.map(job => {
+                  const status = getAppStatus(job.id);
+                  return (
+                    <TouchableOpacity key={job.id} style={styles.jobCard} onPress={() => { setSelectedJob(job); setJobModalVisible(true); }}>
+                      <View style={{flex:1}}>
+                        <Text style={styles.jobTitle}>{job.title}</Text>
+                        <Text style={styles.jobSub}>📍 {job.location}  •  💰 {job.pay_rate}</Text>
+                      </View>
+                      <View style={[styles.statusBadge, status ? {backgroundColor:'#E8F5E9'} : {backgroundColor:'#FFF3E0'}]}>
+                          <Text style={{fontSize:10, fontWeight:'bold', color: status ? 'green' : 'orange'}}>
+                            {status ? 'APPLIED' : 'VIEW'}
+                          </Text>
+                      </View>
                     </TouchableOpacity>
-                  )}
-                </View>
-              );
-            })}
+                  );
+                })}
+              </>
+            )}
+          </ScrollView>
+        )}
+
+        {/* TAB: COMMUNITY */}
+        {activeTab === 'community' && (
+          <ScrollView contentContainerStyle={styles.padding}>
+             <Text style={styles.sectionTitle}>Community Feed 🗣️</Text>
+             <View style={styles.card}>
+               <TextInput placeholder="What's happening?" value={newPostContent} onChangeText={setNewPostContent} multiline style={{minHeight:60}} />
+               <TouchableOpacity style={[styles.smallBtn, {alignSelf:'flex-end', marginTop:10, backgroundColor:'#2E5834'}]} onPress={createPost}>
+                 <Text style={{color:'white'}}>Post</Text>
+               </TouchableOpacity>
+             </View>
+             
+             {posts.map(post => (
+               <View key={post.id} style={styles.postCard}>
+                 <Text style={{fontWeight:'bold'}}>{post.author_name} <Text style={{fontWeight:'normal', fontSize:12}}>({post.author_role})</Text></Text>
+                 <Text style={{color:'#444', marginTop:5, marginBottom:10}}>{post.content}</Text>
+                 
+                 <View style={{flexDirection:'row', borderTopWidth:1, borderColor:'#eee', paddingTop:10, gap:20}}>
+                    {/* TOGGLE LIKE BUTTON */}
+                    <TouchableOpacity onPress={() => toggleLike(post)} style={{flexDirection:'row', alignItems:'center'}}>
+                      <Ionicons name={post.isLikedByMe ? "heart" : "heart-outline"} size={20} color={post.isLikedByMe ? "red" : "#666"} />
+                      <Text style={{marginLeft:5, color:'#666'}}>{post.likes || 0}</Text>
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity onPress={() => openComments(post)} style={{flexDirection:'row', alignItems:'center'}}>
+                      <Ionicons name="chatbubble-outline" size={20} color="#666" />
+                      <Text style={{marginLeft:5, color:'#666'}}>Reply</Text>
+                    </TouchableOpacity>
+                 </View>
+               </View>
+             ))}
           </ScrollView>
         )}
 
         {/* TAB: PROFILE */}
         {activeTab === 'profile' && (
-          <ScrollView contentContainerStyle={styles.padding}>
-            <Text style={styles.sectionTitle}>Edit Profile</Text>
-            
-            <View style={styles.profileBox}>
-              <View style={styles.avatarCircle}>
-                <Text style={{fontSize:30}}>{userRole === 'farmer' ? '👨‍🌾' : '👷'}</Text>
-              </View>
-              
-              <Text style={styles.label}>Full Name</Text>
-              <TextInput value={profile.full_name} onChangeText={t=>setProfile({...profile, full_name:t})} style={styles.input} />
-              
-              <Text style={styles.label}>Phone Number</Text>
-              <TextInput value={profile.phone} onChangeText={t=>setProfile({...profile, phone:t})} placeholder="+60..." style={styles.input} />
-              
-              <Text style={styles.label}>Bio / About Me</Text>
-              <TextInput value={profile.bio} onChangeText={t=>setProfile({...profile, bio:t})} multiline style={[styles.input, {height:80}]} />
-              
-              {userRole === 'worker' && (
-                <>
-                  <Text style={styles.label}>Experience (Years)</Text>
-                  <TextInput value={profile.experience_years} onChangeText={t=>setProfile({...profile, experience_years:t})} style={styles.input} />
-                </>
-              )}
+           <ScrollView contentContainerStyle={styles.padding}>
+             <View style={styles.profileBox}>
+                <View style={styles.avatarCircle}><Text style={{fontSize:40}}>{userRole === 'farmer' ? '👨‍🌾' : '👷'}</Text></View>
+                
+                <TouchableOpacity style={{position:'absolute', right:20, top:20}} onPress={() => setIsEditingProfile(!isEditingProfile)}>
+                  <Ionicons name={isEditingProfile ? "close-circle" : "create-outline"} size={28} color="#2E5834" />
+                </TouchableOpacity>
 
-              <TouchableOpacity style={styles.btnMain} onPress={updateProfile}>
-                {loading ? <ActivityIndicator color="white"/> : <Text style={styles.btnText}>Save Changes</Text>}
-              </TouchableOpacity>
-            </View>
-          </ScrollView>
+                {isEditingProfile ? (
+                  <View style={{width:'100%'}}>
+                    <Text style={styles.label}>Name</Text>
+                    <TextInput value={profile.full_name} onChangeText={t=>setProfile({...profile, full_name:t})} style={styles.input} />
+                    <Text style={styles.label}>Phone</Text>
+                    <TextInput value={profile.phone} onChangeText={t=>setProfile({...profile, phone:t})} style={styles.input} />
+                    <Text style={styles.label}>Bio</Text>
+                    <TextInput value={profile.bio} onChangeText={t=>setProfile({...profile, bio:t})} multiline style={[styles.input, {height:80}]} />
+                    
+                    {userRole === 'worker' && (
+                      <View style={{marginTop:10, paddingTop:10, borderTopWidth:1, borderColor:'#eee'}}>
+                        <Text style={[styles.label, {color:'#E3B642'}]}>Experience</Text>
+                        <TextInput placeholder="Years" value={profile.experience_years} onChangeText={t=>setProfile({...profile, experience_years:t})} style={styles.input} />
+                      </View>
+                    )}
+                    <TouchableOpacity style={styles.btnMain} onPress={saveProfile}>
+                      {loading ? <ActivityIndicator color="white"/> : <Text style={styles.btnText}>Save Changes</Text>}
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <View style={{alignItems:'center', width:'100%'}}>
+                    <Text style={styles.sectionTitle}>{profile.full_name || 'User'}</Text>
+                    <Text style={{color:'#666', marginBottom:5}}>{profile.phone || 'No phone added'}</Text>
+                    <Text style={{textAlign:'center', fontStyle:'italic', color:'#555', marginBottom:20}}>"{profile.bio || 'No bio yet.'}"</Text>
+                    
+                    {userRole === 'worker' && (
+                      <>
+                        <View style={{backgroundColor:'#F9F9F9', padding:15, borderRadius:10, width:'100%', alignItems:'center', marginBottom:10}}>
+                           <Text style={{fontWeight:'bold'}}>Experience: {profile.experience_years || 0} Years</Text>
+                        </View>
+                        <TouchableOpacity style={[styles.btnSec, {width:'100%', flexDirection:'row', justifyContent:'center'}]} onPress={pickResume}>
+                           <Ionicons name="document-text" size={20} color="#2E5834" />
+                           <Text style={{marginLeft:10, fontWeight:'bold', color:'#2E5834'}}>
+                             {uploadingResume ? "Uploading..." : profile.resume_url ? "Update Resume PDF" : "Upload Resume PDF"}
+                           </Text>
+                        </TouchableOpacity>
+                        {profile.resume_url && <Text style={{color:'green', marginTop:5, fontSize:12}}>✅ Resume Active</Text>}
+                      </>
+                    )}
+                  </View>
+                )}
+             </View>
+           </ScrollView>
         )}
-
       </View>
 
-      {/* BOTTOM NAVIGATION */}
+      {/* MODALS */}
+      <Modal visible={jobModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <TouchableOpacity style={{alignSelf:'flex-end'}} onPress={() => setJobModalVisible(false)}><Ionicons name="close" size={24} color="#333" /></TouchableOpacity>
+            {selectedJob && (
+              <>
+                <Text style={styles.modalTitle}>{selectedJob.title}</Text>
+                <Text style={styles.modalSub}>📍 {selectedJob.location}</Text>
+                <Text style={styles.modalPay}>💰 {selectedJob.pay_rate}</Text>
+                <View style={styles.divider} />
+                <ScrollView style={{maxHeight:150}}><Text style={{color:'#444', lineHeight:22}}>{selectedJob.description}</Text></ScrollView>
+                {userRole === 'worker' && (
+                  <TouchableOpacity 
+                    style={[styles.btnMain, {marginTop:20, backgroundColor: getAppStatus(selectedJob.id) ? '#ccc' : '#E3B642'}]}
+                    disabled={!!getAppStatus(selectedJob.id)}
+                    onPress={() => applyForJob(selectedJob.id)}
+                  >
+                    <Text style={[styles.btnText, {color: getAppStatus(selectedJob.id) ? '#666' : '#2E5834'}]}>
+                      {getAppStatus(selectedJob.id) ? 'ALREADY APPLIED' : 'APPLY NOW'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={commentModalVisible} animationType="slide">
+        <SafeAreaView style={{flex:1}}>
+          <View style={[styles.topBar, {flexDirection:'row', alignItems:'center'}]}>
+             <TouchableOpacity onPress={() => setCommentModalVisible(false)}><Text style={{color:'white'}}>Close</Text></TouchableOpacity>
+             <Text style={[styles.appLogo, {marginLeft:20, fontSize:18}]}>Comments</Text>
+          </View>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{flex:1}}>
+            <FlatList data={comments} contentContainerStyle={{padding:20}} renderItem={({item}) => (
+               <View style={{backgroundColor:'#eee', padding:10, borderRadius:10, marginBottom:10}}>
+                 <Text style={{fontWeight:'bold', fontSize:12}}>{item.user_name}</Text>
+                 <Text>{item.content}</Text>
+               </View>
+            )}/>
+            <View style={{padding:15, borderTopWidth:1, borderColor:'#ddd', flexDirection:'row'}}>
+              <TextInput placeholder="Write a comment..." value={newComment} onChangeText={setNewComment} style={{flex:1, padding:10, borderWidth:1, borderColor:'#ddd', borderRadius:20}} />
+              <TouchableOpacity onPress={postComment} style={{justifyContent:'center', marginLeft:10}}><Ionicons name="send" size={24} color="#2E5834"/></TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </SafeAreaView>
+      </Modal>
+
       <View style={styles.bottomNav}>
-        <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('home')}>
-          <Ionicons name="briefcase" size={24} color={activeTab==='home'?'#E3B642':'#fff'} />
-          <Text style={[styles.navText, activeTab==='home' && {color:'#E3B642'}]}>Jobs</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('profile')}>
-          <Ionicons name="person" size={24} color={activeTab==='profile'?'#E3B642':'#fff'} />
-          <Text style={[styles.navText, activeTab==='profile' && {color:'#E3B642'}]}>Profile</Text>
-        </TouchableOpacity>
+        <TouchableOpacity style={styles.navItem} onPress={() => changeTab('home')}><Ionicons name="briefcase" size={24} color={activeTab==='home'?'#E3B642':'#fff'} /><Text style={styles.navText}>Jobs</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.navItem} onPress={() => changeTab('community')}><Ionicons name="people" size={24} color={activeTab==='community'?'#E3B642':'#fff'} /><Text style={styles.navText}>Community</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.navItem} onPress={() => changeTab('profile')}><Ionicons name="person" size={24} color={activeTab==='profile'?'#E3B642':'#fff'} /><Text style={styles.navText}>Profile</Text></TouchableOpacity>
       </View>
-
     </SafeAreaView>
   );
 }
@@ -285,47 +554,42 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAF8' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   padding: { padding: 20, paddingBottom: 100 },
-  
-  // Auth & Welcome
-  bgImage: { flex: 1, justifyContent: 'center' },
+  bgImage: { flex: 1 },
   overlay: { backgroundColor: 'rgba(46, 88, 52, 0.85)', flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   titleBig: { fontSize: 42, fontWeight: 'bold', color: '#fff', marginBottom: 5 },
   glassCard: { backgroundColor: 'rgba(255,255,255,0.9)', width: '100%', padding: 25, borderRadius: 20 },
   roleBtn: { flexDirection: 'row', padding: 15, backgroundColor: '#fff', borderRadius: 12, marginBottom: 10, alignItems:'center', borderWidth:1, borderColor:'#ddd' },
   roleText: { fontSize: 18, marginLeft: 15, fontWeight:'600', color:'#2E5834' },
   labelWhite: { color: '#333', fontSize:16, fontWeight:'bold', marginBottom:15, textAlign:'center' },
-  
   header: { fontSize: 28, fontWeight: 'bold', color: '#2E5834', marginBottom: 5 },
   subHeader: { color: '#666', marginBottom: 30, fontSize:16 },
   input: { backgroundColor: '#fff', padding: 15, borderRadius: 12, borderWidth: 1, borderColor: '#eee', marginBottom: 15, fontSize:16 },
   btnMain: { backgroundColor: '#2E5834', padding: 16, borderRadius: 12, alignItems: 'center', shadowColor: '#2E5834', shadowOpacity: 0.3, shadowRadius: 5, elevation:4 },
   btnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-
-  // App Header
+  btnSec: { backgroundColor: '#fff', borderWidth:1, borderColor:'#2E5834', padding: 12, borderRadius: 12, alignItems: 'center' },
   topBar: { backgroundColor: '#2E5834', padding: 20, paddingTop: 50, flexDirection: 'row', justifyContent: 'space-between', alignItems:'center' },
   appLogo: { color: '#fff', fontSize: 22, fontWeight: 'bold', letterSpacing:1 },
-
-  // Cards
+  communityBanner: { backgroundColor:'#4CAF50', padding:15, borderRadius:15, marginBottom:20, flexDirection:'row', justifyContent:'space-between', alignItems:'center', shadowColor:'#000', shadowOpacity:0.1, shadowRadius:4, elevation:3 },
   card: { backgroundColor: '#fff', padding: 20, borderRadius: 16, marginBottom: 20, shadowColor:'#000', shadowOpacity:0.05, shadowRadius:10, elevation:2 },
   cardHeader: { fontSize:18, fontWeight:'bold', color:'#333', marginBottom:15 },
   inputSmall: { backgroundColor: '#F9F9F9', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#eee', marginBottom: 10 },
-  
-  // Job Listing
   sectionTitle: { fontSize: 20, fontWeight: 'bold', color: '#1A1A1A', marginBottom: 15, marginTop:10 },
   jobCard: { backgroundColor: '#fff', padding: 20, borderRadius: 16, marginBottom: 15, flexDirection:'row', justifyContent:'space-between', alignItems:'center', shadowColor:'#000', shadowOpacity:0.05, shadowRadius:5, elevation:2, borderLeftWidth:4, borderLeftColor:'#E3B642' },
   jobTitle: { fontSize: 17, fontWeight: 'bold', color: '#333', marginBottom: 4 },
   jobSub: { color: '#666', fontSize:13 },
-  applyBtn: { backgroundColor: '#E3B642', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 8 },
-  disabledBtn: { backgroundColor: '#ddd' },
-  applyBtnText: { fontWeight: 'bold', color: '#2E5834', fontSize:12 },
-
-  // Profile
-  profileBox: { alignItems:'center', backgroundColor:'#fff', padding:20, borderRadius:20 },
-  avatarCircle: { width:80, height:80, backgroundColor:'#F0F5F1', borderRadius:40, justifyContent:'center', alignItems:'center', marginBottom:20 },
+  statusBadge: { padding:5, borderRadius:5 },
+  postCard: { backgroundColor: '#fff', padding: 15, borderRadius: 12, marginBottom: 10, elevation: 1 },
+  smallBtn: { paddingVertical:8, paddingHorizontal:15, borderRadius:20 },
+  profileBox: { alignItems:'center', backgroundColor:'#fff', padding:30, borderRadius:20 },
+  avatarCircle: { width:100, height:100, backgroundColor:'#F0F5F1', borderRadius:50, justifyContent:'center', alignItems:'center', marginBottom:20 },
   label: { alignSelf:'flex-start', marginLeft:5, marginBottom:5, fontWeight:'600', color:'#555', marginTop:10 },
-
-  // Bottom Nav
-  bottomNav: { position: 'absolute', bottom: 0, width: '100%', backgroundColor: '#2E5834', flexDirection: 'row', paddingVertical: 15, paddingHorizontal:30, justifyContent: 'space-around', borderTopLeftRadius:20, borderTopRightRadius:20 },
+  bottomNav: { position: 'absolute', bottom: 0, width: '100%', backgroundColor: '#2E5834', flexDirection: 'row', paddingVertical: 12, paddingHorizontal:20, justifyContent: 'space-around', borderTopLeftRadius:20, borderTopRightRadius:20 },
   navItem: { alignItems: 'center' },
-  navText: { color: '#fff', fontSize: 11, marginTop: 4, fontWeight:'600' }
+  navText: { color: '#fff', fontSize: 11, marginTop: 4, fontWeight:'600' },
+  modalOverlay: { flex:1, backgroundColor:'rgba(0,0,0,0.5)', justifyContent:'center', padding:20 },
+  modalContent: { backgroundColor:'#fff', borderRadius:20, padding:25 },
+  modalTitle: { fontSize:22, fontWeight:'bold', color:'#2E5834', marginBottom:5 },
+  modalSub: { fontSize:16, color:'#666', marginBottom:5 },
+  modalPay: { fontSize:18, fontWeight:'bold', color:'#E3B642', marginBottom:15 },
+  divider: { height:1, backgroundColor:'#eee', marginVertical:15 }
 });
