@@ -51,6 +51,7 @@ export default function App() {
   // Resume
   const [uploadingResume, setUploadingResume] = useState(false);
 
+  // LOAD USER ON START
   useEffect(() => { checkUser(); }, []);
 
   // --- ANIMATED TRANSITIONS ---
@@ -144,20 +145,18 @@ export default function App() {
     else Alert.alert("Check Email", "Password reset link sent to " + email);
   };
 
-  // --- ACTIONS: JOB POSTING (FIXED) ---
+  // --- ACTIONS: JOBS ---
   const postJob = async () => {
     if (!newJob.title || !newJob.pay) return Alert.alert("Missing Info");
-    
-    // FIX: We explicitly map 'desc' to 'description' so DB understands
     const { error } = await supabase.from('jobs').insert({ 
         title: newJob.title,
         location: newJob.location,
         pay_rate: newJob.pay,
-        description: newJob.desc, // <--- THIS WAS THE FIX
+        description: newJob.desc, 
         farmer_id: session.user.id 
     });
 
-    if (error) Alert.alert("Error", error.message);
+    if (error) Alert.alert("Post Job Failed", error.message);
     else {
         setNewJob({ title: '', location: '', pay: '', desc: '' });
         Alert.alert("Success", "Job Posted!");
@@ -166,41 +165,69 @@ export default function App() {
   };
 
   const applyForJob = async (jobId) => {
-    if (myApplications.find(a => a.job_id === jobId)) return Alert.alert("Notice", "Already Applied");
-    const { error } = await supabase.from('applications').insert({ job_id: jobId, worker_id: session.user.id });
-    if (!error) {
-      Alert.alert("🎉 Success", "Application Sent!"); setJobModalVisible(false); fetchData('worker', session.user.id);
+    // 1. Frontend Check (Instant feedback)
+    if (myApplications.find(a => a.job_id === jobId)) {
+        return Alert.alert("Notice", "You have already applied for this job.");
+    }
+    
+    // 2. Database Attempt
+    const { error } = await supabase.from('applications').insert({ 
+      job_id: jobId, 
+      worker_id: session.user.id 
+    });
+    
+    if (error) {
+      // 3. Backend Check (If Frontend Check failed/lagged)
+      if (error.code === '23505') { // Code for "Unique Violation"
+          Alert.alert("Notice", "You have already applied for this job.");
+      } else {
+          Alert.alert("Apply Failed", error.message);
+      }
+    } else {
+      Alert.alert("🎉 Success", "Application Sent!"); 
+      setJobModalVisible(false); 
+      fetchData('worker', session.user.id);
     }
   };
 
-  // --- COMMUNITY (FIXED LIKES) ---
+  // --- COMMUNITY ---
   const fetchPosts = async () => {
-    // Get posts AND the likes specifically for THIS user
-    const { data } = await supabase
+    const { data, error } = await supabase
         .from('posts')
         .select('*, post_likes(user_id)')
         .order('created_at', { ascending: false });
         
     if (data) {
-        // Process data to see if *I* liked it
         const processed = data.map(post => ({
             ...post,
-            isLikedByMe: post.post_likes.some(like => like.user_id === session.user.id)
+            isLikedByMe: post.post_likes ? post.post_likes.some(like => like.user_id === session.user.id) : false
         }));
         setPosts(processed);
     }
   };
 
   const createPost = async () => {
-    if (!newPostContent) return;
+    if (!newPostContent) return Alert.alert("Empty", "Please write something!");
+    const safeName = profile.full_name || 'Anonymous';
+    const safeRole = userRole || 'user';
+
     const { error } = await supabase.from('posts').insert({
-      content: newPostContent, author_id: session.user.id, author_name: profile.full_name, author_role: userRole
+      content: newPostContent, 
+      author_id: session.user.id, 
+      author_name: safeName, 
+      author_role: safeRole
     });
-    if (!error) { setNewPostContent(''); fetchPosts(); }
+
+    if (!error) { 
+      setNewPostContent(''); 
+      fetchPosts(); 
+      Alert.alert("Success", "Posted!");
+    } else {
+      Alert.alert("Post Failed", error.message);
+    }
   };
 
-  const toggleLike = async (post) => {
-    // Optimistic UI Update
+  const likePost = async (post) => {
     const isCurrentlyLiked = post.isLikedByMe;
     const newLikeCount = isCurrentlyLiked ? (post.likes - 1) : (post.likes + 1);
     
@@ -208,11 +235,9 @@ export default function App() {
     setPosts(updatedPosts);
 
     if (isCurrentlyLiked) {
-        // Unlike: Remove from DB
         await supabase.from('post_likes').delete().match({ user_id: session.user.id, post_id: post.id });
         await supabase.from('posts').update({ likes: newLikeCount }).eq('id', post.id);
     } else {
-        // Like: Add to DB
         await supabase.from('post_likes').insert({ user_id: session.user.id, post_id: post.id });
         await supabase.from('posts').update({ likes: newLikeCount }).eq('id', post.id);
     }
@@ -237,7 +262,7 @@ export default function App() {
     }
   };
 
-  // --- RESUME & HELPERS ---
+  // --- RESUME ---
   const pickResume = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true });
@@ -420,7 +445,7 @@ export default function App() {
                  
                  <View style={{flexDirection:'row', borderTopWidth:1, borderColor:'#eee', paddingTop:10, gap:20}}>
                     {/* TOGGLE LIKE BUTTON */}
-                    <TouchableOpacity onPress={() => toggleLike(post)} style={{flexDirection:'row', alignItems:'center'}}>
+                    <TouchableOpacity onPress={() => likePost(post)} style={{flexDirection:'row', alignItems:'center'}}>
                       <Ionicons name={post.isLikedByMe ? "heart" : "heart-outline"} size={20} color={post.isLikedByMe ? "red" : "#666"} />
                       <Text style={{marginLeft:5, color:'#666'}}>{post.likes || 0}</Text>
                     </TouchableOpacity>
@@ -506,7 +531,7 @@ export default function App() {
                 {userRole === 'worker' && (
                   <TouchableOpacity 
                     style={[styles.btnMain, {marginTop:20, backgroundColor: getAppStatus(selectedJob.id) ? '#ccc' : '#E3B642'}]}
-                    disabled={!!getAppStatus(selectedJob.id)}
+                    // removed disabled={...} so you can click it!
                     onPress={() => applyForJob(selectedJob.id)}
                   >
                     <Text style={[styles.btnText, {color: getAppStatus(selectedJob.id) ? '#666' : '#2E5834'}]}>
