@@ -94,21 +94,50 @@ export default function App() {
     } catch (e) { setLoading(false); }
   };
 
-  const fetchData = async (role, userId) => {
+const fetchData = async (role, userId) => {
+    setLoading(true);
     try {
+      // 1. FETCH JOBS FIRST
       let jobQuery = supabase.from('jobs').select('*');
       if (role === 'farmer') {
-        jobQuery = jobQuery.eq('farmer_id', userId); 
+         jobQuery = jobQuery.eq('farmer_id', userId);
       }
-      const { data: jobData } = await jobQuery;
-      setJobs(jobData || []);
+      const { data: jobData, error: jobError } = await jobQuery;
+      if (jobError) {
+        console.log("Job fetch error:", jobError.message);
+      } else {
+        setJobs(jobData || []);
+      }
 
-      if (role === 'worker') {
-        const { data: appData } = await supabase.from('applications').select('*, jobs(*)').eq('worker_id', userId);
+      // 2. FETCH APPLICATIONS 
+      if (role === 'farmer' && jobData && jobData.length > 0) {
+          const myJobIds = jobData.map(j => j.id);
+          const { data: correctApps, error: appErr } = await supabase
+            .from('applications')
+            .select(`
+              *,
+              jobs ( title )
+            `)
+            .in('job_id', myJobIds); // Only apply for these jobs
+            
+          if (appErr) console.log("App fetch error:", appErr.message);
+          setMyApplications(correctApps || []);
+      } 
+      
+      // 3. FETCH WORKER APPLICATIONS
+      else if (role === 'worker') {
+        const { data: appData } = await supabase
+           .from('applications')
+           .select('*, jobs(*)')
+           .eq('worker_id', userId);
         setMyApplications(appData || []);
       }
-    } catch (e) { console.log(e); } 
-    finally { setLoading(false); }
+
+    } catch (e) {
+      console.log("Critical Error:", e);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleAuth = async () => {
@@ -165,19 +194,28 @@ export default function App() {
   };
 
   const applyForJob = async (jobId) => {
+    const finalJobId = (typeof jobId === 'string' || typeof jobId === 'number') ? jobId : selectedJob?.id;
+    
+    if (!finalJobId) return;
+
     // 1. Frontend Check (Instant feedback)
-    if (myApplications.find(a => a.job_id === jobId)) {
+    if (myApplications.find(a => a.job_id === finalJobId)) {
         return Alert.alert("Notice", "You have already applied for this job.");
     }
-    
-    // 2. Database Attempt
+
+    // 2. GET WORKER NAME
+    const workerName = session?.user?.user_metadata?.full_name || "AgriLink Worker";
+
+    // 3. Database Attempt
     const { error } = await supabase.from('applications').insert({ 
-      job_id: jobId, 
-      worker_id: session.user.id 
+      job_id: finalJobId, 
+      worker_id: session.user.id,
+      applicant_name: workerName,  // <-Saving the name here!
+      status: 'pending'
     });
     
     if (error) {
-      // 3. Backend Check (If Frontend Check failed/lagged)
+      // 4. Backend Check
       if (error.code === '23505') { // Code for "Unique Violation"
           Alert.alert("Notice", "You have already applied for this job.");
       } else {
@@ -186,7 +224,25 @@ export default function App() {
     } else {
       Alert.alert("🎉 Success", "Application Sent!"); 
       setJobModalVisible(false); 
+      // Refresh the list immediately
       fetchData('worker', session.user.id);
+    }
+  };
+  const updateAppStatus = async (appId, newStatus) => {
+    // 1. Update Database
+    const { error } = await supabase
+      .from('applications')
+      .update({ status: newStatus })
+      .eq('id', appId);
+
+    if (error) {
+      alert("Error updating: " + error.message);
+    } else {
+      // 2. Update UI Locally (Instant change)
+      setMyApplications(prev => prev.map(app => 
+         app.id === appId ? {...app, status: newStatus} : app
+      ));
+      alert(`Worker ${newStatus} successfully!`);
     }
   };
 
@@ -361,34 +417,84 @@ export default function App() {
                <Ionicons name="arrow-forward-circle" size={30} color="white" />
             </TouchableOpacity>
 
-            {userRole === 'farmer' && (
-              <>
-                <View style={styles.card}>
-                  <Text style={styles.cardHeader}>✍️ Post a Job</Text>
-                  <TextInput placeholder="Job Title" value={newJob.title} onChangeText={t=>setNewJob({...newJob, title:t})} style={styles.inputSmall} />
-                  <View style={{flexDirection:'row', gap:10}}>
-                     <TextInput placeholder="📍 Location" value={newJob.location} onChangeText={t=>setNewJob({...newJob, location:t})} style={[styles.inputSmall, {flex:1}]} />
-                     <TextInput placeholder="💰 Pay (RM)" value={newJob.pay} onChangeText={t=>setNewJob({...newJob, pay:t})} style={[styles.inputSmall, {flex:1}]} />
-                  </View>
-                  <TextInput placeholder="📝 Description" value={newJob.desc} onChangeText={t=>setNewJob({...newJob, desc:t})} style={styles.inputSmall} />
-                  <TouchableOpacity style={styles.btnMain} onPress={postJob}><Text style={styles.btnText}>Post</Text></TouchableOpacity>
+{userRole === 'farmer' && (
+  <>
+    {/* --- 1. POST A JOB CARD --- */}
+    <View style={styles.card}>
+      <Text style={styles.cardHeader}>✍️ Post a Job</Text>
+      <TextInput placeholder="Job Title" value={newJob.title} onChangeText={t=>setNewJob({...newJob, title:t})} style={styles.inputSmall} />
+      <View style={{flexDirection:'row', gap:10}}>
+          <TextInput placeholder="📍 Location" value={newJob.location} onChangeText={t=>setNewJob({...newJob, location:t})} style={[styles.inputSmall, {flex:1}]} />
+          <TextInput placeholder="💰 Pay (RM)" value={newJob.pay} onChangeText={t=>setNewJob({...newJob, pay:t})} style={[styles.inputSmall, {flex:1}]} />
+      </View>
+      <TextInput placeholder="📝 Description" value={newJob.desc} onChangeText={t=>setNewJob({...newJob, desc:t})} style={styles.inputSmall} />
+      <TouchableOpacity style={styles.btnMain} onPress={postJob}><Text style={styles.btnText}>Post</Text></TouchableOpacity>
+    </View>
+
+    {/* --- 2. INCOMING APPLICATIONS SECTION --- */}
+    <View style={{paddingHorizontal: 20, marginBottom: 20}}>
+      <Text style={styles.sectionTitle}>Incoming Applications 📬</Text>
+
+      {myApplications.length === 0 ? (
+        <Text style={{color:'#999', fontStyle:'italic'}}>No workers have applied yet.</Text>
+      ) : (
+        myApplications.map(app => (
+          <View key={app.id} style={{backgroundColor: 'white', padding: 15, borderRadius: 12, marginBottom: 10, elevation: 2, borderLeftWidth: 5, borderLeftColor: '#007BFF'}}>
+            
+            {/* Job Title */}
+            <Text style={{fontSize: 12, color: '#666', marginBottom: 5}}>
+                Applying for: <Text style={{fontWeight:'bold'}}>{app.jobs?.title}</Text>
+            </Text>
+
+            {/* Worker Details & Actions */}
+            <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center'}}>
+                <View>
+                  <Text style={{fontSize: 16, fontWeight: 'bold'}}>{app.profiles?.full_name || "Unknown Worker"}</Text>
+                  <Text style={{fontSize: 12, color: '#444'}}>⭐ {app.profiles?.experience_years || 0} Years Exp</Text>
                 </View>
-
-                <Text style={styles.sectionTitle}>My Listings 📋</Text>
-                {jobs.map(job => (
-                  <View key={job.id} style={styles.jobCard}>
-                    <View style={{flex:1}}>
-                      <Text style={styles.jobTitle}>{job.title}</Text>
-                      <Text style={styles.jobSub}>📍 {job.location}  •  💰 {job.pay_rate}</Text>
-                    </View>
-                    <View style={[styles.statusBadge, {backgroundColor:'#E8F5E9'}]}>
-                        <Text style={{fontSize:10, fontWeight:'bold', color:'green'}}>ACTIVE</Text>
-                    </View>
+                
+                {app.status === 'pending' ? (
+                  <View style={{flexDirection:'row'}}>
+                    <TouchableOpacity onPress={() => updateAppStatus(app.id, 'rejected')} style={{backgroundColor:'#FFEBEE', padding:8, borderRadius:5, marginRight:10}}>
+                        <Text style={{color:'red', fontSize:12}}>Reject</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => updateAppStatus(app.id, 'accepted')} style={{backgroundColor:'#E8F5E9', padding:8, borderRadius:5}}>
+                        <Text style={{color:'green', fontSize:12, fontWeight:'bold'}}>Accept</Text>
+                    </TouchableOpacity>
                   </View>
-                ))}
-              </>
-            )}
+                ) : (
+                  <Text style={{fontWeight:'bold', color: app.status==='accepted'?'green':'red'}}>{app.status.toUpperCase()}</Text>
+                )}
+            </View>
 
+            {/* Phone Number (Only if accepted) */}
+            {app.status === 'accepted' && (
+                <TouchableOpacity style={{marginTop:10, flexDirection:'row', alignItems:'center'}}>
+                   <Text>📞 {app.profiles?.phone || "No Phone Number"}</Text>
+                </TouchableOpacity>
+             )}
+          </View>
+        ))
+      )}
+    </View>
+
+    {/* --- 3. MY LISTINGS SECTION --- */}
+    <Text style={[styles.sectionTitle, {paddingHorizontal: 20}]}>My Listings 📋</Text>
+    
+    {jobs.map(job => (
+      <View key={job.id} style={styles.jobCard}>
+        <View style={{flex:1}}>
+          <Text style={styles.jobTitle}>{job.title}</Text>
+          <Text style={styles.jobSub}>📍 {job.location} • 💰 {job.pay_rate}</Text>
+        </View>
+        <View style={[styles.statusBadge, {backgroundColor:'#E8F5E9'}]}>
+            <Text style={{fontSize:10, fontWeight:'bold', color:'green'}}>ACTIVE</Text>
+        </View>
+      </View>
+    ))}
+
+  </>
+)}
             {userRole === 'worker' && (
               <>
                 <Text style={styles.sectionTitle}>My Applications 📂</Text>
