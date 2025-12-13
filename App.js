@@ -1,6 +1,6 @@
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Alert, 
-  ImageBackground, SafeAreaView, ActivityIndicator, LayoutAnimation, Platform, UIManager, Modal, KeyboardAvoidingView, FlatList, RefreshControl, Image 
+  ImageBackground, SafeAreaView, ActivityIndicator, LayoutAnimation, Platform, UIManager, Modal, KeyboardAvoidingView, FlatList, RefreshControl, Image, Linking 
 } from 'react-native';
 import { useEffect, useState, useCallback } from 'react';
 import { Ionicons } from '@expo/vector-icons';
@@ -95,7 +95,7 @@ export default function App() {
     } catch (e) { setLoading(false); }
   };
 
-  // --- DATA FETCHING (FIXED) ---
+  // --- DATA FETCHING ---
   const fetchData = async (role, userId) => {
     try {
       // 1. FETCH JOBS
@@ -110,11 +110,10 @@ export default function App() {
       if (jobError) console.log("Job error:", jobError.message);
       else setJobs(jobData || []);
 
-      // 2. FETCH FARMER APPLICATIONS (MANUAL JOIN FIX)
+      // 2. FETCH FARMER APPLICATIONS
       if (role === 'farmer' && jobData && jobData.length > 0) {
           const myJobIds = jobData.map(j => j.id);
           
-          // A. Get the applications first
           const { data: rawApps, error: appErr } = await supabase
             .from('applications')
             .select('*, jobs(title)')
@@ -123,19 +122,16 @@ export default function App() {
           if (appErr) {
              console.log("App error:", appErr.message);
           } else if (rawApps && rawApps.length > 0) {
-             // B. Extract Worker IDs
              const workerIds = rawApps.map(a => a.worker_id);
              
-             // C. Fetch Profile Details for these workers
              const { data: profiles } = await supabase
                 .from('profiles')
                 .select('*')
                 .in('id', workerIds);
 
-             // D. Merge Data manually
              const mergedApps = rawApps.map(app => {
                  const workerProfile = profiles?.find(p => p.id === app.worker_id);
-                 return { ...app, profiles: workerProfile }; // Attach profile to app
+                 return { ...app, profiles: workerProfile }; 
              });
              
              setMyApplications(mergedApps);
@@ -144,7 +140,7 @@ export default function App() {
           }
       } 
       
-      // 3. FETCH WORKER APPLICATIONS (STRICT DELETE CHECK)
+      // 3. FETCH WORKER APPLICATIONS
       else if (role === 'worker') {
         const { data: appData, error: workerAppErr } = await supabase
            .from('applications')
@@ -153,7 +149,6 @@ export default function App() {
 
         if (workerAppErr) console.log("Worker error:", workerAppErr.message);
 
-        // FIX: Remove apps where 'jobs' is null (deleted by farmer)
         const validApps = (appData || []).filter(app => app.jobs != null);
         
         setMyApplications(validApps);
@@ -371,6 +366,15 @@ export default function App() {
     else { Alert.alert("Success", "Profile Updated!"); setIsEditingProfile(false); }
   };
 
+  // --- HELPER TO OPEN RESUME ---
+  const openResume = (url) => {
+    if (url) {
+        Linking.openURL(url).catch(err => Alert.alert("Error", "Could not open resume."));
+    } else {
+        Alert.alert("No Resume", "This worker has not uploaded a resume.");
+    }
+  };
+
   const getAppStatus = (jobId) => {
     const app = myApplications.find(a => a.job_id === jobId);
     return app ? app.status : null; 
@@ -465,7 +469,6 @@ export default function App() {
                         <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center'}}>
                             <View style={{flex:1}}>
                               <Text style={{fontSize: 16, fontWeight: 'bold'}}>
-                                  {/* USE FETCHED PROFILE DATA */}
                                   {app.profiles?.full_name || app.applicant_name || "Unknown Worker"}
                               </Text>
                               <Text style={{fontSize: 12, color: '#444'}}>
@@ -474,11 +477,14 @@ export default function App() {
                               <Text style={{fontSize: 12, color: '#666', marginTop: 2}}>
                                   📞 {app.profiles?.phone || "No Phone"}
                               </Text>
+                              
+                              {/* FIX: Use Linking.openURL for resume */}
                               {app.profiles?.resume_url ? (
-                                  <Text style={{color: 'blue', fontSize: 12, marginTop: 2, textDecorationLine: 'underline'}}
-                                    onPress={() => Alert.alert("Resume", "Link: " + app.profiles.resume_url)}>
-                                    📄 View Resume
-                                  </Text>
+                                  <TouchableOpacity onPress={() => openResume(app.profiles.resume_url)}>
+                                    <Text style={{color: 'blue', fontSize: 12, marginTop: 5, textDecorationLine: 'underline', fontWeight:'bold'}}>
+                                      📄 View Resume (PDF)
+                                    </Text>
+                                  </TouchableOpacity>
                               ) : (<Text style={{fontSize: 10, color: '#999'}}>No Resume</Text>)}
                             </View>
                             
