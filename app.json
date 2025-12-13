@@ -4,26 +4,32 @@
     "slug": "AgriLink",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    
+    "icon": "./assets/LOGO.png", 
+    
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/LOGO.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
+    
     "ios": {
       "supportsTablet": true
     },
+    
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/LOGO.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true
     },
+    
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/LOGO.png"
     }
   }
 }

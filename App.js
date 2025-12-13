@@ -1,8 +1,8 @@
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Alert, 
-  ImageBackground, SafeAreaView, ActivityIndicator, LayoutAnimation, Platform, UIManager, Modal, KeyboardAvoidingView, FlatList 
+  ImageBackground, SafeAreaView, ActivityIndicator, LayoutAnimation, Platform, UIManager, Modal, KeyboardAvoidingView, FlatList, RefreshControl, Image 
 } from 'react-native';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker'; 
 import { supabase } from './supabase'; 
@@ -21,6 +21,7 @@ export default function App() {
   const [view, setView] = useState('welcome'); 
   const [activeTab, setActiveTab] = useState('home'); 
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   
   // Profile
   const [profile, setProfile] = useState({ full_name: '', phone: '', bio: '', experience_years: '', experience_details: '', resume_url: '' });
@@ -94,43 +95,68 @@ export default function App() {
     } catch (e) { setLoading(false); }
   };
 
-const fetchData = async (role, userId) => {
-    setLoading(true);
+  // --- DATA FETCHING (FIXED) ---
+  const fetchData = async (role, userId) => {
     try {
-      // 1. FETCH JOBS FIRST
+      // 1. FETCH JOBS
       let jobQuery = supabase.from('jobs').select('*');
       if (role === 'farmer') {
          jobQuery = jobQuery.eq('farmer_id', userId);
-      }
-      const { data: jobData, error: jobError } = await jobQuery;
-      if (jobError) {
-        console.log("Job fetch error:", jobError.message);
       } else {
-        setJobs(jobData || []);
+         jobQuery = jobQuery.order('created_at', { ascending: false });
       }
+      
+      const { data: jobData, error: jobError } = await jobQuery;
+      if (jobError) console.log("Job error:", jobError.message);
+      else setJobs(jobData || []);
 
-      // 2. FETCH APPLICATIONS 
+      // 2. FETCH FARMER APPLICATIONS (MANUAL JOIN FIX)
       if (role === 'farmer' && jobData && jobData.length > 0) {
           const myJobIds = jobData.map(j => j.id);
-          const { data: correctApps, error: appErr } = await supabase
+          
+          // A. Get the applications first
+          const { data: rawApps, error: appErr } = await supabase
             .from('applications')
-            .select(`
-              *,
-              jobs ( title )
-            `)
-            .in('job_id', myJobIds); // Only apply for these jobs
+            .select('*, jobs(title)')
+            .in('job_id', myJobIds);
             
-          if (appErr) console.log("App fetch error:", appErr.message);
-          setMyApplications(correctApps || []);
+          if (appErr) {
+             console.log("App error:", appErr.message);
+          } else if (rawApps && rawApps.length > 0) {
+             // B. Extract Worker IDs
+             const workerIds = rawApps.map(a => a.worker_id);
+             
+             // C. Fetch Profile Details for these workers
+             const { data: profiles } = await supabase
+                .from('profiles')
+                .select('*')
+                .in('id', workerIds);
+
+             // D. Merge Data manually
+             const mergedApps = rawApps.map(app => {
+                 const workerProfile = profiles?.find(p => p.id === app.worker_id);
+                 return { ...app, profiles: workerProfile }; // Attach profile to app
+             });
+             
+             setMyApplications(mergedApps);
+          } else {
+             setMyApplications([]);
+          }
       } 
       
-      // 3. FETCH WORKER APPLICATIONS
+      // 3. FETCH WORKER APPLICATIONS (STRICT DELETE CHECK)
       else if (role === 'worker') {
-        const { data: appData } = await supabase
+        const { data: appData, error: workerAppErr } = await supabase
            .from('applications')
            .select('*, jobs(*)')
            .eq('worker_id', userId);
-        setMyApplications(appData || []);
+
+        if (workerAppErr) console.log("Worker error:", workerAppErr.message);
+
+        // FIX: Remove apps where 'jobs' is null (deleted by farmer)
+        const validApps = (appData || []).filter(app => app.jobs != null);
+        
+        setMyApplications(validApps);
       }
 
     } catch (e) {
@@ -139,6 +165,12 @@ const fetchData = async (role, userId) => {
       setLoading(false);
     }
   };
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchData(userRole, session?.user?.id);
+    setRefreshing(false);
+  }, [userRole, session]);
 
   const handleAuth = async () => {
     if(!email || !password) return Alert.alert("Error", "Please fill in all fields");
@@ -174,7 +206,7 @@ const fetchData = async (role, userId) => {
     else Alert.alert("Check Email", "Password reset link sent to " + email);
   };
 
-  // --- ACTIONS: JOBS ---
+  // --- ACTIONS ---
   const postJob = async () => {
     if (!newJob.title || !newJob.pay) return Alert.alert("Missing Info");
     const { error } = await supabase.from('jobs').insert({ 
@@ -193,70 +225,67 @@ const fetchData = async (role, userId) => {
     }
   };
 
+  const deleteJob = async (jobId) => {
+    Alert.alert(
+        "Delete Job",
+        "Are you sure? This will remove the job from all worker lists.",
+        [
+            { text: "Cancel", style: "cancel" },
+            { text: "Delete", style: "destructive", onPress: async () => {
+                const { error } = await supabase.from('jobs').delete().eq('id', jobId);
+                if (error) {
+                    Alert.alert("Error", error.message);
+                } else {
+                    Alert.alert("Deleted", "Job removed.");
+                    fetchData(userRole, session.user.id);
+                }
+            }}
+        ]
+    );
+  };
+
   const applyForJob = async (jobId) => {
     const finalJobId = (typeof jobId === 'string' || typeof jobId === 'number') ? jobId : selectedJob?.id;
-    
     if (!finalJobId) return;
 
-    // 1. Frontend Check (Instant feedback)
     if (myApplications.find(a => a.job_id === finalJobId)) {
         return Alert.alert("Notice", "You have already applied for this job.");
     }
 
-    // 2. GET WORKER NAME
-    const workerName = session?.user?.user_metadata?.full_name || "AgriLink Worker";
+    const workerName = session?.user?.user_metadata?.full_name || profile.full_name || "AgriLink Worker";
 
-    // 3. Database Attempt
     const { error } = await supabase.from('applications').insert({ 
       job_id: finalJobId, 
       worker_id: session.user.id,
-      applicant_name: workerName,  // <-Saving the name here!
+      applicant_name: workerName,  
       status: 'pending'
     });
     
     if (error) {
-      // 4. Backend Check
-      if (error.code === '23505') { // Code for "Unique Violation"
-          Alert.alert("Notice", "You have already applied for this job.");
-      } else {
-          Alert.alert("Apply Failed", error.message);
-      }
+      if (error.code === '23505') Alert.alert("Notice", "You have already applied.");
+      else Alert.alert("Apply Failed", error.message);
     } else {
       Alert.alert("🎉 Success", "Application Sent!"); 
       setJobModalVisible(false); 
-      // Refresh the list immediately
       fetchData('worker', session.user.id);
     }
   };
-  const updateAppStatus = async (appId, newStatus) => {
-    // 1. Update Database
-    const { error } = await supabase
-      .from('applications')
-      .update({ status: newStatus })
-      .eq('id', appId);
 
-    if (error) {
-      alert("Error updating: " + error.message);
-    } else {
-      // 2. Update UI Locally (Instant change)
-      setMyApplications(prev => prev.map(app => 
-         app.id === appId ? {...app, status: newStatus} : app
-      ));
+  const updateAppStatus = async (appId, newStatus) => {
+    const { error } = await supabase.from('applications').update({ status: newStatus }).eq('id', appId);
+    if (error) alert("Error: " + error.message);
+    else {
+      setMyApplications(prev => prev.map(app => app.id === appId ? {...app, status: newStatus} : app));
       alert(`Worker ${newStatus} successfully!`);
     }
   };
 
   // --- COMMUNITY ---
   const fetchPosts = async () => {
-    const { data, error } = await supabase
-        .from('posts')
-        .select('*, post_likes(user_id)')
-        .order('created_at', { ascending: false });
-        
+    const { data } = await supabase.from('posts').select('*, post_likes(user_id)').order('created_at', { ascending: false });
     if (data) {
         const processed = data.map(post => ({
-            ...post,
-            isLikedByMe: post.post_likes ? post.post_likes.some(like => like.user_id === session.user.id) : false
+            ...post, isLikedByMe: post.post_likes ? post.post_likes.some(like => like.user_id === session.user.id) : false
         }));
         setPosts(processed);
     }
@@ -264,29 +293,16 @@ const fetchData = async (role, userId) => {
 
   const createPost = async () => {
     if (!newPostContent) return Alert.alert("Empty", "Please write something!");
-    const safeName = profile.full_name || 'Anonymous';
-    const safeRole = userRole || 'user';
-
     const { error } = await supabase.from('posts').insert({
-      content: newPostContent, 
-      author_id: session.user.id, 
-      author_name: safeName, 
-      author_role: safeRole
+      content: newPostContent, author_id: session.user.id, author_name: profile.full_name || 'Anonymous', author_role: userRole || 'user'
     });
-
-    if (!error) { 
-      setNewPostContent(''); 
-      fetchPosts(); 
-      Alert.alert("Success", "Posted!");
-    } else {
-      Alert.alert("Post Failed", error.message);
-    }
+    if (!error) { setNewPostContent(''); fetchPosts(); Alert.alert("Success", "Posted!"); } 
+    else Alert.alert("Error", error.message);
   };
 
   const likePost = async (post) => {
     const isCurrentlyLiked = post.isLikedByMe;
     const newLikeCount = isCurrentlyLiked ? (post.likes - 1) : (post.likes + 1);
-    
     const updatedPosts = posts.map(p => p.id === post.id ? { ...p, likes: newLikeCount, isLikedByMe: !isCurrentlyLiked } : p);
     setPosts(updatedPosts);
 
@@ -300,8 +316,7 @@ const fetchData = async (role, userId) => {
   };
 
   const openComments = async (post) => {
-    setSelectedPost(post);
-    setCommentModalVisible(true);
+    setSelectedPost(post); setCommentModalVisible(true);
     const { data } = await supabase.from('comments').select('*').eq('post_id', post.id).order('created_at');
     setComments(data || []);
   };
@@ -322,7 +337,7 @@ const fetchData = async (role, userId) => {
   const pickResume = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true });
-      if (!result.canceled) { uploadResumeToSupabase(result.assets[0]); }
+      if (!result.canceled) uploadResumeToSupabase(result.assets[0]);
     } catch (err) { console.log(err); }
   };
 
@@ -331,13 +346,15 @@ const fetchData = async (role, userId) => {
     const fileName = `${session.user.id}_${Date.now()}.pdf`;
     const formData = new FormData();
     formData.append('file', { uri: file.uri, name: file.name, type: 'application/pdf' });
+    
+    // FIX: Using simple upload policy
     const { error } = await supabase.storage.from('resumes').upload(fileName, formData, { contentType: 'application/pdf' });
+    
     if (error) Alert.alert("Upload Failed", error.message);
     else {
       const { data } = supabase.storage.from('resumes').getPublicUrl(fileName);
-      const newUrl = data.publicUrl;
-      await supabase.from('profiles').update({ resume_url: newUrl }).eq('id', session.user.id);
-      setProfile({ ...profile, resume_url: newUrl });
+      await supabase.from('profiles').update({ resume_url: data.publicUrl }).eq('id', session.user.id);
+      setProfile({ ...profile, resume_url: data.publicUrl });
       Alert.alert("Success", "Resume Uploaded!");
     }
     setUploadingResume(false);
@@ -359,14 +376,13 @@ const fetchData = async (role, userId) => {
     return app ? app.status : null; 
   };
 
-  // --- RENDERERS ---
-
   if (loading) return <View style={styles.center}><ActivityIndicator size="large" color="#2E5834" /></View>;
 
   // 1. WELCOME
   if (view === 'welcome') return (
     <ImageBackground source={{uri: 'https://images.unsplash.com/photo-1625246333195-98d804e9b371?q=80'}} style={styles.bgImage}>
       <View style={styles.overlay}>
+        <Image source={require('./assets/LOGO.png')} style={{width:120, height:120, marginBottom:20, borderRadius:60, borderWidth:3, borderColor:'white'}} />
         <Text style={styles.titleBig}>AgriLink 🌾</Text>
         <Text style={{color:'#eee', marginBottom:30}}>Connect. Grow. Harvest.</Text>
         <View style={styles.glassCard}>
@@ -404,97 +420,106 @@ const fetchData = async (role, userId) => {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.topBar}>
-        <Text style={styles.appLogo}>AgriLink 🚜</Text>
+        <View style={{flexDirection:'row', alignItems:'center'}}>
+           <Image source={require('./assets/LOGO.png')} style={{width:35, height:35, borderRadius:17.5, marginRight:10}} />
+           <Text style={styles.appLogo}>AgriLink</Text>
+        </View>
         <TouchableOpacity onPress={handleLogout}><Ionicons name="log-out-outline" size={24} color="white" /></TouchableOpacity>
       </View>
 
       <View style={{flex:1}}>
         {/* TAB: JOBS */}
         {activeTab === 'home' && (
-          <ScrollView contentContainerStyle={styles.padding}>
+          <ScrollView 
+            contentContainerStyle={styles.padding}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          >
             <TouchableOpacity style={styles.communityBanner} onPress={() => { changeTab('community'); }}>
                <View><Text style={{fontWeight:'bold', color:'#fff'}}>📢 Community Hub</Text><Text style={{color:'#E8F5E9', fontSize:12}}>See what's happening</Text></View>
                <Ionicons name="arrow-forward-circle" size={30} color="white" />
             </TouchableOpacity>
 
-{userRole === 'farmer' && (
-  <>
-    {/* --- 1. POST A JOB CARD --- */}
-    <View style={styles.card}>
-      <Text style={styles.cardHeader}>✍️ Post a Job</Text>
-      <TextInput placeholder="Job Title" value={newJob.title} onChangeText={t=>setNewJob({...newJob, title:t})} style={styles.inputSmall} />
-      <View style={{flexDirection:'row', gap:10}}>
-          <TextInput placeholder="📍 Location" value={newJob.location} onChangeText={t=>setNewJob({...newJob, location:t})} style={[styles.inputSmall, {flex:1}]} />
-          <TextInput placeholder="💰 Pay (RM)" value={newJob.pay} onChangeText={t=>setNewJob({...newJob, pay:t})} style={[styles.inputSmall, {flex:1}]} />
-      </View>
-      <TextInput placeholder="📝 Description" value={newJob.desc} onChangeText={t=>setNewJob({...newJob, desc:t})} style={styles.inputSmall} />
-      <TouchableOpacity style={styles.btnMain} onPress={postJob}><Text style={styles.btnText}>Post</Text></TouchableOpacity>
-    </View>
-
-    {/* --- 2. INCOMING APPLICATIONS SECTION --- */}
-    <View style={{paddingHorizontal: 20, marginBottom: 20}}>
-      <Text style={styles.sectionTitle}>Incoming Applications 📬</Text>
-
-      {myApplications.length === 0 ? (
-        <Text style={{color:'#999', fontStyle:'italic'}}>No workers have applied yet.</Text>
-      ) : (
-        myApplications.map(app => (
-          <View key={app.id} style={{backgroundColor: 'white', padding: 15, borderRadius: 12, marginBottom: 10, elevation: 2, borderLeftWidth: 5, borderLeftColor: '#007BFF'}}>
-            
-            {/* Job Title */}
-            <Text style={{fontSize: 12, color: '#666', marginBottom: 5}}>
-                Applying for: <Text style={{fontWeight:'bold'}}>{app.jobs?.title}</Text>
-            </Text>
-
-            {/* Worker Details & Actions */}
-            <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center'}}>
-                <View>
-                  <Text style={{fontSize: 16, fontWeight: 'bold'}}>{app.profiles?.full_name || "Unknown Worker"}</Text>
-                  <Text style={{fontSize: 12, color: '#444'}}>⭐ {app.profiles?.experience_years || 0} Years Exp</Text>
-                </View>
-                
-                {app.status === 'pending' ? (
-                  <View style={{flexDirection:'row'}}>
-                    <TouchableOpacity onPress={() => updateAppStatus(app.id, 'rejected')} style={{backgroundColor:'#FFEBEE', padding:8, borderRadius:5, marginRight:10}}>
-                        <Text style={{color:'red', fontSize:12}}>Reject</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => updateAppStatus(app.id, 'accepted')} style={{backgroundColor:'#E8F5E9', padding:8, borderRadius:5}}>
-                        <Text style={{color:'green', fontSize:12, fontWeight:'bold'}}>Accept</Text>
-                    </TouchableOpacity>
+            {userRole === 'farmer' && (
+              <>
+                <View style={styles.card}>
+                  <Text style={styles.cardHeader}>✍️ Post a Job</Text>
+                  <TextInput placeholder="Job Title" value={newJob.title} onChangeText={t=>setNewJob({...newJob, title:t})} style={styles.inputSmall} />
+                  <View style={{flexDirection:'row', gap:10}}>
+                      <TextInput placeholder="📍 Location" value={newJob.location} onChangeText={t=>setNewJob({...newJob, location:t})} style={[styles.inputSmall, {flex:1}]} />
+                      <TextInput placeholder="💰 Pay (RM)" value={newJob.pay} onChangeText={t=>setNewJob({...newJob, pay:t})} style={[styles.inputSmall, {flex:1}]} />
                   </View>
-                ) : (
-                  <Text style={{fontWeight:'bold', color: app.status==='accepted'?'green':'red'}}>{app.status.toUpperCase()}</Text>
-                )}
-            </View>
+                  <TextInput placeholder="📝 Description" value={newJob.desc} onChangeText={t=>setNewJob({...newJob, desc:t})} style={styles.inputSmall} />
+                  <TouchableOpacity style={styles.btnMain} onPress={postJob}><Text style={styles.btnText}>Post</Text></TouchableOpacity>
+                </View>
 
-            {/* Phone Number (Only if accepted) */}
-            {app.status === 'accepted' && (
-                <TouchableOpacity style={{marginTop:10, flexDirection:'row', alignItems:'center'}}>
-                   <Text>📞 {app.profiles?.phone || "No Phone Number"}</Text>
-                </TouchableOpacity>
-             )}
-          </View>
-        ))
-      )}
-    </View>
+                <View style={{paddingHorizontal: 20, marginBottom: 20}}>
+                  <Text style={styles.sectionTitle}>Incoming Applications 📬</Text>
+                  {myApplications.length === 0 ? (
+                    <Text style={{color:'#999', fontStyle:'italic'}}>No workers have applied yet.</Text>
+                  ) : (
+                    myApplications.map(app => (
+                      <View key={app.id} style={{backgroundColor: 'white', padding: 15, borderRadius: 12, marginBottom: 10, elevation: 2, borderLeftWidth: 5, borderLeftColor: '#007BFF'}}>
+                        <Text style={{fontSize: 12, color: '#666', marginBottom: 5}}>
+                            Applying for: <Text style={{fontWeight:'bold'}}>{app.jobs?.title}</Text>
+                        </Text>
+                        <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center'}}>
+                            <View style={{flex:1}}>
+                              <Text style={{fontSize: 16, fontWeight: 'bold'}}>
+                                  {/* USE FETCHED PROFILE DATA */}
+                                  {app.profiles?.full_name || app.applicant_name || "Unknown Worker"}
+                              </Text>
+                              <Text style={{fontSize: 12, color: '#444'}}>
+                                  ⭐ {app.profiles?.experience_years || 0} Years Exp
+                              </Text>
+                              <Text style={{fontSize: 12, color: '#666', marginTop: 2}}>
+                                  📞 {app.profiles?.phone || "No Phone"}
+                              </Text>
+                              {app.profiles?.resume_url ? (
+                                  <Text style={{color: 'blue', fontSize: 12, marginTop: 2, textDecorationLine: 'underline'}}
+                                    onPress={() => Alert.alert("Resume", "Link: " + app.profiles.resume_url)}>
+                                    📄 View Resume
+                                  </Text>
+                              ) : (<Text style={{fontSize: 10, color: '#999'}}>No Resume</Text>)}
+                            </View>
+                            
+                            {app.status === 'pending' ? (
+                              <View style={{flexDirection:'column', gap:5}}>
+                                <TouchableOpacity onPress={() => updateAppStatus(app.id, 'accepted')} style={{backgroundColor:'#E8F5E9', padding:8, borderRadius:5, alignItems:'center'}}>
+                                    <Text style={{color:'green', fontSize:12, fontWeight:'bold'}}>Accept</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity onPress={() => updateAppStatus(app.id, 'rejected')} style={{backgroundColor:'#FFEBEE', padding:8, borderRadius:5, alignItems:'center'}}>
+                                    <Text style={{color:'red', fontSize:12}}>Reject</Text>
+                                </TouchableOpacity>
+                              </View>
+                            ) : (
+                              <Text style={{fontWeight:'bold', color: app.status==='accepted'?'green':'red'}}>{app.status.toUpperCase()}</Text>
+                            )}
+                        </View>
+                      </View>
+                    ))
+                  )}
+                </View>
 
-    {/* --- 3. MY LISTINGS SECTION --- */}
-    <Text style={[styles.sectionTitle, {paddingHorizontal: 20}]}>My Listings 📋</Text>
-    
-    {jobs.map(job => (
-      <View key={job.id} style={styles.jobCard}>
-        <View style={{flex:1}}>
-          <Text style={styles.jobTitle}>{job.title}</Text>
-          <Text style={styles.jobSub}>📍 {job.location} • 💰 {job.pay_rate}</Text>
-        </View>
-        <View style={[styles.statusBadge, {backgroundColor:'#E8F5E9'}]}>
-            <Text style={{fontSize:10, fontWeight:'bold', color:'green'}}>ACTIVE</Text>
-        </View>
-      </View>
-    ))}
-
-  </>
-)}
+                <Text style={[styles.sectionTitle, {paddingHorizontal: 20}]}>My Listings 📋</Text>
+                {jobs.map(job => (
+                  <View key={job.id} style={styles.jobCard}>
+                    <View style={{flex:1}}>
+                      <Text style={styles.jobTitle}>{job.title}</Text>
+                      <Text style={styles.jobSub}>📍 {job.location} • 💰 {job.pay_rate}</Text>
+                    </View>
+                    <View style={{alignItems: 'flex-end'}}>
+                        <View style={[styles.statusBadge, {backgroundColor:'#E8F5E9', marginBottom: 5}]}>
+                            <Text style={{fontSize:10, fontWeight:'bold', color:'green'}}>ACTIVE</Text>
+                        </View>
+                        <TouchableOpacity onPress={() => deleteJob(job.id)} style={{backgroundColor: '#FFEBEE', padding: 5, borderRadius: 5}}>
+                            <Ionicons name="trash-outline" size={16} color="red" />
+                        </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </>
+            )}
+            
             {userRole === 'worker' && (
               <>
                 <Text style={styles.sectionTitle}>My Applications 📂</Text>
@@ -511,7 +536,7 @@ const fetchData = async (role, userId) => {
                   ))
                 )}
 
-                <Text style={[styles.sectionTitle, {marginTop:10}]}>Available Jobs 💼</Text>
+                <Text style={[styles.sectionTitle, {marginTop:10}]}>Available Jobs 💼 <Text style={{fontSize:12, fontWeight:'normal'}}>(Pull down to refresh)</Text></Text>
                 {jobs.map(job => {
                   const status = getAppStatus(job.id);
                   return (
@@ -548,14 +573,11 @@ const fetchData = async (role, userId) => {
                <View key={post.id} style={styles.postCard}>
                  <Text style={{fontWeight:'bold'}}>{post.author_name} <Text style={{fontWeight:'normal', fontSize:12}}>({post.author_role})</Text></Text>
                  <Text style={{color:'#444', marginTop:5, marginBottom:10}}>{post.content}</Text>
-                 
                  <View style={{flexDirection:'row', borderTopWidth:1, borderColor:'#eee', paddingTop:10, gap:20}}>
-                    {/* TOGGLE LIKE BUTTON */}
                     <TouchableOpacity onPress={() => likePost(post)} style={{flexDirection:'row', alignItems:'center'}}>
                       <Ionicons name={post.isLikedByMe ? "heart" : "heart-outline"} size={20} color={post.isLikedByMe ? "red" : "#666"} />
                       <Text style={{marginLeft:5, color:'#666'}}>{post.likes || 0}</Text>
                     </TouchableOpacity>
-                    
                     <TouchableOpacity onPress={() => openComments(post)} style={{flexDirection:'row', alignItems:'center'}}>
                       <Ionicons name="chatbubble-outline" size={20} color="#666" />
                       <Text style={{marginLeft:5, color:'#666'}}>Reply</Text>
@@ -571,7 +593,6 @@ const fetchData = async (role, userId) => {
            <ScrollView contentContainerStyle={styles.padding}>
              <View style={styles.profileBox}>
                 <View style={styles.avatarCircle}><Text style={{fontSize:40}}>{userRole === 'farmer' ? '👨‍🌾' : '👷'}</Text></View>
-                
                 <TouchableOpacity style={{position:'absolute', right:20, top:20}} onPress={() => setIsEditingProfile(!isEditingProfile)}>
                   <Ionicons name={isEditingProfile ? "close-circle" : "create-outline"} size={28} color="#2E5834" />
                 </TouchableOpacity>
@@ -637,7 +658,6 @@ const fetchData = async (role, userId) => {
                 {userRole === 'worker' && (
                   <TouchableOpacity 
                     style={[styles.btnMain, {marginTop:20, backgroundColor: getAppStatus(selectedJob.id) ? '#ccc' : '#E3B642'}]}
-                    // removed disabled={...} so you can click it!
                     onPress={() => applyForJob(selectedJob.id)}
                   >
                     <Text style={[styles.btnText, {color: getAppStatus(selectedJob.id) ? '#666' : '#2E5834'}]}>
