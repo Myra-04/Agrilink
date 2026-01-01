@@ -1,3 +1,4 @@
+//Developer: Myra Fasha - AgriLink App
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Alert, 
   ImageBackground, SafeAreaView, ActivityIndicator, LayoutAnimation, Platform, UIManager, Modal, KeyboardAvoidingView, FlatList, RefreshControl, Image, Linking 
